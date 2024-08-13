@@ -1,1 +1,1 @@
-# bancodedados
+# curso-banco-de-dados

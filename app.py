@@ -1,8 +1,12 @@
+import datetime
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import pandas as pd
+from functools import wraps
+from flask import abort
+
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "sua_chave_secreta"  # Substitua por uma chave secreta segura
@@ -18,10 +22,18 @@ class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(150), nullable=False, unique=True)
     password = db.Column(db.String(150), nullable=False)
+    first_name = db.Column(db.String(150), nullable=False)
+    last_name = db.Column(db.String(150), nullable=False)
+    role = db.Column(db.String(150), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
 
-    def __init__(self, username, password):
+    def __init__(self, username, password, first_name, last_name, role, is_admin=False):
         self.username = username
-        self.password = bcrypt.generate_password_hash(password).decode('utf-8')
+        self.password = bcrypt.generate_password_hash(password).decode("utf-8")
+        self.first_name = first_name
+        self.last_name = last_name
+        self.role = role
+        self.is_admin = is_admin
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -49,6 +61,17 @@ class Livro(db.Model):
     def __repr__(self):
         return f"<Livro {self.titulo}>"
     
+
+class Reservation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    book_id = db.Column(db.Integer, db.ForeignKey('livro.id'), nullable=False)
+    date_reserved = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
+
+    def __init__(self, user_id, book_id):
+        self.user_id = user_id
+        self.book_id = book_id
+
 with app.app_context():
     db.create_all()
 
@@ -142,11 +165,27 @@ def logout():
     logout_user()
     return redirect(url_for("login"))
 
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 @app.route("/cadastro", methods=["GET", "POST"])
+@login_required
+@admin_required
 def cadastro():
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
+        first_name = request.form.get("first_name")
+        last_name = request.form.get("last_name")
+        role = request.form.get("role")
+        is_admin = request.form.get("is_admin") == 'on'  # Verifica se o checkbox foi marcado
+
         # Verifique se o usuário já existe
         existing_user = User.query.filter_by(username=username).first()
         if existing_user:
@@ -154,12 +193,69 @@ def cadastro():
             return redirect(url_for("cadastro"))
 
         # Criação de um novo usuário
-        new_user = User(username=username, password=password)
+        new_user = User(username=username, password=password, first_name=first_name, last_name=last_name, role=role, is_admin=is_admin)
         db.session.add(new_user)
         db.session.commit()
         flash("Cadastro realizado com sucesso! Você já pode fazer login.")
         return redirect(url_for("login"))
     return render_template("cadastro.html")
+
+@app.errorhandler(403)
+def forbidden_error(error):
+    return render_template("403.html"), 403
+
+
+@app.route("/reservar", methods=["GET"])
+@login_required
+def reservar():
+    livros = Livro.query.all()  # Pega todos os livros
+    return render_template("reservar.html", livros=livros)
+
+@app.route("/fazer_reserva/<int:book_id>")
+@login_required
+def fazer_reserva(book_id):
+    # Verifica se o livro já foi reservado pelo usuário
+    reserva_existente = Reservation.query.filter_by(user_id=current_user.id, book_id=book_id).first()
+    if reserva_existente:
+        flash("Você já reservou este livro.")
+        return redirect(url_for("reservar"))
+
+    # Criação de uma nova reserva
+    nova_reserva = Reservation(user_id=current_user.id, book_id=book_id)
+    db.session.add(nova_reserva)
+    db.session.commit()
+    flash("Reserva realizada com sucesso!")
+    return redirect(url_for("reservar"))
+
+@app.route("/minhas_reservas")
+@login_required
+def minhas_reservas():
+    reservas = Reservation.query.filter_by(user_id=current_user.id).all()
+    return render_template("minhas_reservas.html", reservas=reservas)
+
+
+@app.route("/dashboard")
+@login_required
+@admin_required
+def dashboard():
+    # Totalizadores
+    total_livros = Livro.query.count()
+    total_usuarios = User.query.count()
+    total_reservas = Reservation.query.count()
+
+    # Dados para os gráficos
+    livros_por_autor = db.session.query(Livro.autor, db.func.count(Livro.id)).group_by(Livro.autor).all()
+    livros_por_ano = db.session.query(Livro.ano, db.func.count(Livro.id)).group_by(Livro.ano).all()
+    livros_por_editora = db.session.query(Livro.editora, db.func.count(Livro.id)).group_by(Livro.editora).all()
+
+    return render_template("dashboard.html",
+                           total_livros=total_livros,
+                           total_usuarios=total_usuarios,
+                           total_reservas=total_reservas,
+                           livros_por_autor=livros_por_autor,
+                           livros_por_ano=livros_por_ano,
+                           livros_por_editora=livros_por_editora)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
